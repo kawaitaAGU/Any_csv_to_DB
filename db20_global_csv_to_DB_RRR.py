@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import io
@@ -60,7 +59,6 @@ def _normalize_newlines(text: str, newline: str = "\n") -> str:
     return t
 
 def _safe_filename(s: str) -> str:
-    # ファイル名に使えない文字を除去
     s = _strip(s)
     s = re.sub(r'[\\/:*?"<>|]+', "_", s)
     s = re.sub(r"\s+", "_", s)
@@ -130,35 +128,29 @@ def ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 # =========================================================
 # ★ 文字コードを「日本語として自然に読めるもの」に寄せるデコード
-#    （cp932混在/一部不正バイトでも“文字化け優先”を避ける）
 # =========================================================
 def _decode_best_effort(raw: bytes) -> str:
     candidates = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "euc_jp"]
 
-    # まずは strict decode を試す
     for enc in candidates:
         try:
             return raw.decode(enc)
         except Exception:
             pass
 
-    # strict が全滅した場合：replace decode して「日本語が多く、�が少ない」ものを採用
     best_text = None
     best_score = None
-
-    # ここが重要：cp932 系を優先して評価（utf-8 ignore で“読めた扱い”を防ぐ）
     for enc in ["cp932", "shift_jis", "euc_jp", "utf-8-sig", "utf-8"]:
         try:
             t = raw.decode(enc, errors="replace")
         except Exception:
             continue
 
-        rep = t.count("\ufffd")  # replacement char
+        rep = t.count("\ufffd")
         jp = sum(
             1 for ch in t
             if ("\u3040" <= ch <= "\u30ff") or ("\u4e00" <= ch <= "\u9fff")
         )
-        # rep が少ないほど良い / jp が多いほど良い
         score = rep * 1000 - jp
         if best_score is None or score < best_score:
             best_score = score
@@ -167,20 +159,44 @@ def _decode_best_effort(raw: bytes) -> str:
     if best_text is not None:
         return best_text
 
-    # 最後の手段
     return raw.decode("utf-8", errors="ignore")
 
 # =========================================================
-# ★ CSV読み込み（ヘッダ補正＋列数補正つき）
+# ★ ヘッダ有無判定＆自動ヘッダ付与（←③対策の本体）
+# =========================================================
+def _looks_like_header(cols: list[str]) -> bool:
+    joined = "".join(cols)
+    header_tokens = ["問題文", "設問", "選択肢", "正解", "解答", "分類", "科目", "リンク", "URL", "ID", "番号"]
+    return any(tok in joined for tok in header_tokens)
+
+def _default_header_by_ncol(ncol: int) -> list[str]:
+    # まず「問題文 + 選択肢1-5」は共通として寄せる
+    base = ["問題文", "選択肢1", "選択肢2", "選択肢3", "選択肢4", "選択肢5"]
+
+    # ③は ncol=8 で「正解(空)」「科目分類」
+    if ncol == 8:
+        return base + ["正解", "科目分類"]
+
+    # よくある想定：+ 正解 + 科目分類 + 問題番号ID + リンクURL（計10）
+    if ncol == 10:
+        return base + ["正解", "科目分類", "問題番号ID", "リンクURL"]
+
+    # 9列：リンク無し or 問題番号無し等のケース
+    if ncol == 9:
+        # 「正解・科目分類・問題番号ID」までを優先
+        return base + ["正解", "科目分類", "問題番号ID"]
+
+    # 7列：正解無しで分類まで など
+    if ncol == 7:
+        return base + ["科目分類"]
+
+    # それ以外：とりあえずcol_1..で作る（壊れないこと優先）
+    return [f"col{i+1}" for i in range(ncol)]
+
+# =========================================================
+# ★ CSV読み込み（ヘッダ補正＋列数補正＋ヘッダ無し対応）
 # =========================================================
 def read_csv_safely_with_column_fix(uploaded_file) -> pd.DataFrame:
-    """
-    1) bytes→文字列（日本語として自然に読めるデコードを採用）
-    2) ヘッダ1行目の '、' を ',' に補正（混在対策）
-    3) csv.readerで行ごとに列数をヘッダに合わせる
-       - 列不足→右を空で埋める
-       - 列過多→先頭列へ吸収（本文にカンマが入っても壊れにくい）
-    """
     raw = uploaded_file.getvalue()
     text = _decode_best_effort(raw)
 
@@ -188,12 +204,21 @@ def read_csv_safely_with_column_fix(uploaded_file) -> pd.DataFrame:
     if not lines:
         return pd.DataFrame()
 
-    # ★ヘッダだけ補正（ここが効く：問題文、選択肢1,... の「、」混在）
-    header_line = lines[0].replace("、", ",")
-    data_lines = lines[1:]
+    # 1行目の区切り文字ゆらぎ対策（ヘッダ候補のみ）
+    first_line = lines[0].replace("、", ",")
+    first_cols = next(csv.reader([first_line]))
 
-    header = next(csv.reader([header_line]))
-    header = [h.strip().replace("\ufeff", "") for h in header]
+    has_header = _looks_like_header([c.strip() for c in first_cols])
+
+    if has_header:
+        header = [h.strip().replace("\ufeff", "") for h in first_cols]
+        data_lines = lines[1:]
+    else:
+        # ★ヘッダ無し：1行目はデータ
+        ncol = len(first_cols)
+        header = _default_header_by_ncol(ncol)
+        data_lines = lines  # 1行目から全部データ
+
     ncol = len(header)
 
     fixed_rows = []
@@ -243,7 +268,6 @@ if not query:
 keywords = [kw.strip() for kw in query.split("&") if kw.strip()]
 
 def row_text(r: pd.Series) -> str:
-    # 全列を対象にする（列名が想定外でも検索漏れしない）
     vals = []
     for v in r.values:
         if v is None:
@@ -280,7 +304,6 @@ st.download_button(
 # GoodNotes 用 CSV（Front/Back）
 # =========================================================
 def _gn_clean(s: str) -> str:
-    # 問題文末尾の識別番号は保持（全角空白だけ除去）
     return _strip(s).replace("　", "")
 
 def _gn_make_front_back(row: pd.Series,
@@ -325,7 +348,7 @@ def dataframe_to_goodnotes_bytes(df_in: pd.DataFrame) -> bytes:
     for c in out.columns:
         out[c] = out[c].map(lambda v: _normalize_newlines(v, "\n"))
     buf = io.StringIO()
-    buf.write("\ufeff")  # BOM
+    buf.write("\ufeff")
     out.to_csv(buf, index=False, lineterminator="\n")
     return buf.getvalue().encode("utf-8")
 
@@ -438,7 +461,6 @@ def create_pdf(records: pd.DataFrame):
         cat = safe_get(row, ["科目分類"])
         code = safe_get(row, ["問題番号ID"])
 
-        # 画像の事前取得
         pil = None
         img_est_h = 0
         link_raw = safe_get(row, ["リンクURL"])
@@ -455,7 +477,6 @@ def create_pdf(records: pd.DataFrame):
                 pil = None
                 img_est_h = len(wrapped_lines("", "[画像読み込み失敗]", usable_width, JAPANESE_FONT, 12)) * line_h
 
-        # 高さ見積り
         est_h = 0
         q_lines = wrapped_lines("問題文: ", q, usable_width, JAPANESE_FONT, 12)
         est_h += len(q_lines) * line_h
