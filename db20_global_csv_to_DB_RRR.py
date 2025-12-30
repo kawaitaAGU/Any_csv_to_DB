@@ -35,8 +35,8 @@ def _setup_font():
 
 JAPANESE_FONT = _setup_font()
 
-st.set_page_config(page_title="🔍 歯科問題検索データベース（全文検索・最終安定版）", layout="wide")
-st.title("🔍 歯科問題検索データベース（全文検索・最終安定版）")
+st.set_page_config(page_title="🔍 csv問題drop->検索DB_txt_pdf_goodnote-csv_csv出力", layout="wide")
+st.title("🔍 csv問題drop->検索DB_txt_pdf_goodnote-csv_csv出力")
 
 # =========================================================
 # 文字・改行ユーティリティ
