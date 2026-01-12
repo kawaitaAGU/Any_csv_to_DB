@@ -59,7 +59,6 @@ def _normalize_newlines(text: str, newline: str = "\n") -> str:
     return t
 
 def _safe_filename(s: str) -> str:
-    # ファイル名に使えない文字を除去
     s = _strip(s)
     s = re.sub(r'[\\/:*?"<>|]+', "_", s)
     s = re.sub(r"\s+", "_", s)
@@ -82,7 +81,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "選択肢3": ["選択肢Ｃ","選択肢c","C","ｃ","ChoiceC","choiceC","選択肢C"],
         "選択肢4": ["選択肢Ｄ","選択肢d","D","ｄ","ChoiceD","choiceD","選択肢D"],
         "選択肢5": ["選択肢Ｅ","選択肢e","E","ｅ","ChoiceE","choiceE","選択肢E"],
-        "正解":    ["解答","答え","ans","answer","正答","Answer","ANSWER","正解(解答)"],
+        "正解":    ["正解答", "解答","答え","ans","answer","正答","Answer","ANSWER","正解(解答)"],
         "科目分類": ["分類","科目","カテゴリ","カテゴリー","分野","Subject","subject","Category","category"],
         "リンクURL": ["画像URL","画像リンク","リンク","画像Link","URL","url","link","Link","ImageURL","image_url"],
         "問題番号ID": ["問題番号", "識別番号", "ID", "番号", "No", "NO", "no", "qid", "QID"],
@@ -149,7 +148,7 @@ def _decode_best_effort(raw: bytes) -> str:
         except Exception:
             continue
 
-        rep = t.count("\ufffd")  # replacement char
+        rep = t.count("\ufffd")
         jp = sum(
             1 for ch in t
             if ("\u3040" <= ch <= "\u30ff") or ("\u4e00" <= ch <= "\u9fff")
@@ -172,7 +171,7 @@ def _looks_like_header(cols: list[str]) -> bool:
     header_tokens = [
         "問題文", "設問", "問題", "本文", "question", "Question",
         "選択肢", "choice", "Choice",
-        "正解", "解答", "答え", "ans", "answer", "Answer",
+        "正解", "正解答", "解答", "答え", "ans", "answer", "Answer",
         "分類", "科目", "カテゴリ", "category", "subject",
         "リンク", "URL", "url", "link",
         "ID", "番号", "No", "qid"
@@ -199,13 +198,17 @@ def _default_header_by_ncol(ncol: int) -> list[str]:
     if ncol == 7:
         return base + ["科目分類"]
 
-    # その他：壊れないこと最優先
+    # それ以外：壊れないこと最優先
     return [f"col{i+1}" for i in range(ncol)]
 
 # =========================================================
 # ★ 正解列の推定＆修正（中身を見て決める）
+#    ※ ○×, true/false にも対応
 # =========================================================
-ANSWER_PAT = re.compile(r"^\s*([A-Ea-e]|[1-5]|[ア-オ]|[ａ-ｅ]|[１-５])\s*$")
+ANSWER_PAT = re.compile(
+    r"^\s*([A-Ea-e]|[1-5]|[ア-オ]|[ａ-ｅ]|[１-５]|[○×]|(true|false))\s*$",
+    re.IGNORECASE
+)
 
 def _answer_like_ratio(series: pd.Series) -> float:
     s = series.astype(str).map(lambda x: x.strip())
@@ -247,7 +250,6 @@ def fix_answer_column_by_content(df: pd.DataFrame) -> pd.DataFrame:
     # 一定以上なら採用
     if best_col is not None and best_ratio >= 0.20:
         if best_col == "科目分類":
-            # スワップで救済
             if "科目分類" not in df.columns:
                 df["科目分類"] = ""
             df["正解"], df["科目分類"] = df["科目分類"], df["正解"]
@@ -275,7 +277,6 @@ def read_csv_safely_with_column_fix(uploaded_file) -> pd.DataFrame:
     if not lines:
         return pd.DataFrame()
 
-    # 1行目の区切り文字ゆらぎ対策（ヘッダ候補のみ）
     first_line = lines[0].replace("、", ",")
     first_cols = next(csv.reader([first_line]))
     first_cols_stripped = [c.strip().replace("\ufeff", "") for c in first_cols]
@@ -286,7 +287,6 @@ def read_csv_safely_with_column_fix(uploaded_file) -> pd.DataFrame:
         header = first_cols_stripped
         data_lines = lines[1:]
     else:
-        # ヘッダ無し：1行目からデータ
         ncol_guess = len(first_cols_stripped)
         header = _default_header_by_ncol(ncol_guess)
         data_lines = lines
@@ -299,12 +299,10 @@ def read_csv_safely_with_column_fix(uploaded_file) -> pd.DataFrame:
         if not row or all((str(c).strip() == "" for c in row)):
             continue
 
-        # 列が多すぎる：余りを先頭列へ吸収
         while len(row) > ncol:
             row[0] = str(row[0]) + "," + str(row[1])
             del row[1]
 
-        # 列が足りない：右を空で埋める
         if len(row) < ncol:
             row = row + [""] * (ncol - len(row))
 
@@ -328,7 +326,7 @@ df = normalize_columns(df)
 if "リンクURL" not in df.columns and "URL" in df.columns:
     df.rename(columns={"URL": "リンクURL"}, inplace=True)
 
-# ★ ここが肝：正解列を中身から救済（どのCSVでも落ちにくい）
+# ★ どのCSVでも正解が落ちないよう救済
 df = fix_answer_column_by_content(df)
 
 # =========================================================
@@ -343,7 +341,6 @@ if not query:
 keywords = [kw.strip() for kw in query.split("&") if kw.strip()]
 
 def row_text(r: pd.Series) -> str:
-    # 全列を対象にする（列名が想定外でも検索漏れしない）
     vals = []
     for v in r.values:
         if v is None:
@@ -380,7 +377,6 @@ st.download_button(
 # GoodNotes 用 CSV（Front/Back）
 # =========================================================
 def _gn_clean(s: str) -> str:
-    # 問題文末尾の識別番号は保持（全角空白だけ除去）
     return _strip(s).replace("　", "")
 
 def _gn_make_front_back(row: pd.Series,
