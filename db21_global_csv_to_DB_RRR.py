@@ -36,7 +36,7 @@ def _setup_font():
 JAPANESE_FONT = _setup_font()
 
 st.set_page_config(page_title="🔍 Any csv to drop_DB", layout="wide")
-st.title("🔍 any csv to drop_DB")
+st.title("🔍 Any csv to drop_DB")
 
 # =========================================================
 # 文字・改行ユーティリティ
@@ -76,16 +76,16 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # よくある別名 → 正式名
     alias = {
-        "問題文":  ["設問", "問題", "本文"],
-        "選択肢1": ["選択肢Ａ","選択肢a","A","ａ"],
-        "選択肢2": ["選択肢Ｂ","選択肢b","B","ｂ"],
-        "選択肢3": ["選択肢Ｃ","選択肢c","C","ｃ"],
-        "選択肢4": ["選択肢Ｄ","選択肢d","D","ｄ"],
-        "選択肢5": ["選択肢Ｅ","選択肢e","E","ｅ"],
-        "正解":    ["解答","答え","ans","answer","正答"],
-        "科目分類": ["分類","科目","カテゴリ","カテゴリー","分野"],
-        "リンクURL": ["画像URL","画像リンク","リンク","画像Link","URL","url"],
-        "問題番号ID": ["問題番号", "識別番号", "ID", "番号"],
+        "問題文":  ["設問", "問題", "本文", "Question", "question", "Q"],
+        "選択肢1": ["選択肢Ａ","選択肢a","A","ａ","ChoiceA","choiceA","選択肢A"],
+        "選択肢2": ["選択肢Ｂ","選択肢b","B","ｂ","ChoiceB","choiceB","選択肢B"],
+        "選択肢3": ["選択肢Ｃ","選択肢c","C","ｃ","ChoiceC","choiceC","選択肢C"],
+        "選択肢4": ["選択肢Ｄ","選択肢d","D","ｄ","ChoiceD","choiceD","選択肢D"],
+        "選択肢5": ["選択肢Ｅ","選択肢e","E","ｅ","ChoiceE","choiceE","選択肢E"],
+        "正解":    ["解答","答え","ans","answer","正答","Answer","ANSWER","正解(解答)"],
+        "科目分類": ["分類","科目","カテゴリ","カテゴリー","分野","Subject","subject","Category","category"],
+        "リンクURL": ["画像URL","画像リンク","リンク","画像Link","URL","url","link","Link","ImageURL","image_url"],
+        "問題番号ID": ["問題番号", "識別番号", "ID", "番号", "No", "NO", "no", "qid", "QID"],
     }
     colset = set(df.columns)
     for canon, cands in alias.items():
@@ -129,23 +129,20 @@ def ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 # =========================================================
 # ★ 文字コードを「日本語として自然に読めるもの」に寄せるデコード
-#    （cp932混在/一部不正バイトでも“文字化け優先”を避ける）
 # =========================================================
 def _decode_best_effort(raw: bytes) -> str:
     candidates = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "euc_jp"]
 
-    # まずは strict decode を試す
+    # まずは strict decode
     for enc in candidates:
         try:
             return raw.decode(enc)
         except Exception:
             pass
 
-    # strict が全滅した場合：replace decode して「日本語が多く、�が少ない」ものを採用
+    # strictが全滅した場合：replace decodeして「日本語が多く、�が少ない」ものを採用
     best_text = None
     best_score = None
-
-    # ここが重要：cp932 系を優先して評価（utf-8 ignore で“読めた扱い”を防ぐ）
     for enc in ["cp932", "shift_jis", "euc_jp", "utf-8-sig", "utf-8"]:
         try:
             t = raw.decode(enc, errors="replace")
@@ -157,7 +154,6 @@ def _decode_best_effort(raw: bytes) -> str:
             1 for ch in t
             if ("\u3040" <= ch <= "\u30ff") or ("\u4e00" <= ch <= "\u9fff")
         )
-        # rep が少ないほど良い / jp が多いほど良い
         score = rep * 1000 - jp
         if best_score is None or score < best_score:
             best_score = score
@@ -166,17 +162,109 @@ def _decode_best_effort(raw: bytes) -> str:
     if best_text is not None:
         return best_text
 
-    # 最後の手段
     return raw.decode("utf-8", errors="ignore")
 
 # =========================================================
-# ★ CSV読み込み（ヘッダ補正＋列数補正つき）
+# ★ ヘッダ有無判定＆自動ヘッダ付与（より頑丈版）
+# =========================================================
+def _looks_like_header(cols: list[str]) -> bool:
+    joined = "".join(cols)
+    header_tokens = [
+        "問題文", "設問", "問題", "本文", "question", "Question",
+        "選択肢", "choice", "Choice",
+        "正解", "解答", "答え", "ans", "answer", "Answer",
+        "分類", "科目", "カテゴリ", "category", "subject",
+        "リンク", "URL", "url", "link",
+        "ID", "番号", "No", "qid"
+    ]
+    return any(tok in joined for tok in header_tokens)
+
+def _default_header_by_ncol(ncol: int) -> list[str]:
+    base = ["問題文", "選択肢1", "選択肢2", "選択肢3", "選択肢4", "選択肢5"]
+
+    # 8列は「正解/科目分類」の順がCSVで逆転しやすいので、
+    # いったん両方作って後段で中身から補正する
+    if ncol == 8:
+        return base + ["科目分類", "正解"]
+
+    # 10列：正解+分類+ID+URL
+    if ncol == 10:
+        return base + ["正解", "科目分類", "問題番号ID", "リンクURL"]
+
+    # 9列：URL無し等
+    if ncol == 9:
+        return base + ["正解", "科目分類", "問題番号ID"]
+
+    # 7列：分類のみ追加
+    if ncol == 7:
+        return base + ["科目分類"]
+
+    # その他：壊れないこと最優先
+    return [f"col{i+1}" for i in range(ncol)]
+
+# =========================================================
+# ★ 正解列の推定＆修正（中身を見て決める）
+# =========================================================
+ANSWER_PAT = re.compile(r"^\s*([A-Ea-e]|[1-5]|[ア-オ]|[ａ-ｅ]|[１-５])\s*$")
+
+def _answer_like_ratio(series: pd.Series) -> float:
+    s = series.astype(str).map(lambda x: x.strip())
+    s = s[s != ""]
+    if len(s) == 0:
+        return 0.0
+    ok = s.map(lambda x: bool(ANSWER_PAT.match(x))).sum()
+    return ok / len(s)
+
+def fix_answer_column_by_content(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    ・正解列が空/ほぼ空なのに、他列に正解らしい値が多い場合に救済
+    ・科目分類と正解が入れ替わっているケース等を自動補正
+    """
+    df = df.copy()
+
+    if "正解" not in df.columns:
+        df["正解"] = ""
+
+    # 既に「正解っぽい」値がそこそこ入っていればOK
+    ans_ratio = _answer_like_ratio(df["正解"])
+    if ans_ratio >= 0.20:
+        return df
+
+    # 全列から「正解っぽい」列を探す
+    best_col = None
+    best_ratio = 0.0
+    for c in df.columns:
+        if c == "正解":
+            continue
+        try:
+            r = _answer_like_ratio(df[c])
+        except Exception:
+            continue
+        if r > best_ratio:
+            best_ratio = r
+            best_col = c
+
+    # 一定以上なら採用
+    if best_col is not None and best_ratio >= 0.20:
+        if best_col == "科目分類":
+            # スワップで救済
+            if "科目分類" not in df.columns:
+                df["科目分類"] = ""
+            df["正解"], df["科目分類"] = df["科目分類"], df["正解"]
+        else:
+            df["正解"] = df[best_col]
+
+    return df
+
+# =========================================================
+# ★ CSV読み込み（ヘッダ補正＋列数補正＋ヘッダ無し対応）
 # =========================================================
 def read_csv_safely_with_column_fix(uploaded_file) -> pd.DataFrame:
     """
     1) bytes→文字列（日本語として自然に読めるデコードを採用）
-    2) ヘッダ1行目の '、' を ',' に補正（混在対策）
-    3) csv.readerで行ごとに列数をヘッダに合わせる
+    2) 1行目の '、' を ',' に補正（混在対策）
+    3) ヘッダ有無を判定：無ければ列数から仮ヘッダ生成
+    4) csv.readerで行ごとに列数を揃える
        - 列不足→右を空で埋める
        - 列過多→先頭列へ吸収（本文にカンマが入っても壊れにくい）
     """
@@ -187,23 +275,33 @@ def read_csv_safely_with_column_fix(uploaded_file) -> pd.DataFrame:
     if not lines:
         return pd.DataFrame()
 
-    # ★ヘッダだけ補正（ここが効く：問題文、選択肢1,... の「、」混在）
-    header_line = lines[0].replace("、", ",")
-    data_lines = lines[1:]
+    # 1行目の区切り文字ゆらぎ対策（ヘッダ候補のみ）
+    first_line = lines[0].replace("、", ",")
+    first_cols = next(csv.reader([first_line]))
+    first_cols_stripped = [c.strip().replace("\ufeff", "") for c in first_cols]
 
-    header = next(csv.reader([header_line]))
-    header = [h.strip().replace("\ufeff", "") for h in header]
+    has_header = _looks_like_header(first_cols_stripped)
+
+    if has_header:
+        header = first_cols_stripped
+        data_lines = lines[1:]
+    else:
+        # ヘッダ無し：1行目からデータ
+        ncol_guess = len(first_cols_stripped)
+        header = _default_header_by_ncol(ncol_guess)
+        data_lines = lines
+
     ncol = len(header)
 
     fixed_rows = []
     reader = csv.reader(data_lines)
     for row in reader:
-        if not row or all((c.strip() == "" for c in row)):
+        if not row or all((str(c).strip() == "" for c in row)):
             continue
 
         # 列が多すぎる：余りを先頭列へ吸収
         while len(row) > ncol:
-            row[0] = row[0] + "," + row[1]
+            row[0] = str(row[0]) + "," + str(row[1])
             del row[1]
 
         # 列が足りない：右を空で埋める
@@ -229,6 +327,9 @@ df = normalize_columns(df)
 # URL列だけのCSVでも「リンクURL」に寄せる
 if "リンクURL" not in df.columns and "URL" in df.columns:
     df.rename(columns={"URL": "リンクURL"}, inplace=True)
+
+# ★ ここが肝：正解列を中身から救済（どのCSVでも落ちにくい）
+df = fix_answer_column_by_content(df)
 
 # =========================================================
 # 検索
